@@ -11,54 +11,88 @@ from typing import Optional
 import subprocess
 import re
 
+# Windows TTS imports
+try:
+    import pyttsx3
+    PYTTSX3_AVAILABLE = True
+except ImportError:
+    PYTTSX3_AVAILABLE = False
+
 class BT7274Voice:
     def __init__(self, model_dir: str = None):
         """Initialize BT-7274's voice synthesis system"""
-        if model_dir is None:
-            # Default to voice_model directory relative to this file
-            current_dir = Path(__file__).parent
-            model_dir = current_dir.parent / "voice_model"
+        self.use_windows_tts = False  # Flag for fallback TTS
         
-        self.model_dir = Path(model_dir)
-        self.model_path = self.model_dir / "BT7274.onnx"
-        self.config_path = self.model_dir / "BT7274.onnx.json"
-        
-        if not self.model_path.exists():
-            raise FileNotFoundError(f"ONNX model not found: {self.model_path}")
-        if not self.config_path.exists():
-            raise FileNotFoundError(f"Model config not found: {self.config_path}")
-        
-        # Load model configuration
-        with open(self.config_path, 'r', encoding='utf-8') as f:
-            self.config = json.load(f)
-        
-        # Initialize ONNX runtime session
-        self.session = onnxruntime.InferenceSession(
-            str(self.model_path),
-            providers=['CPUExecutionProvider']  # Use CPU for reliability
-        )
-        
-        # Get model input/output info
-        self.inputs = self.session.get_inputs()
-        self.outputs = self.session.get_outputs()
-        
-        print(f"Model inputs: {[inp.name for inp in self.inputs]}")
-        print(f"Model outputs: {[out.name for out in self.outputs]}")
-        
-        # Main input is typically the first one (phoneme IDs)
-        self.input_name = self.inputs[0].name
-        self.output_name = self.outputs[0].name
-        
-        # Audio configuration
-        self.sample_rate = self.config["audio"]["sample_rate"]
-        self.phoneme_id_map = self.config["phoneme_id_map"]
-        
-        # Inference parameters
-        self.noise_scale = self.config["inference"]["noise_scale"]
-        self.length_scale = self.config["inference"]["length_scale"] 
-        self.noise_w = self.config["inference"]["noise_w"]
-        
-        print(f"BT-7274 Voice System initialized. Sample rate: {self.sample_rate}Hz")
+        try:
+            if model_dir is None:
+                # Default to voice_model directory relative to this file
+                current_dir = Path(__file__).parent
+                model_dir = current_dir.parent / "voice_model"
+            
+            self.model_dir = Path(model_dir)
+            self.model_path = self.model_dir / "BT7274.onnx"
+            self.config_path = self.model_dir / "BT7274.onnx.json"
+            
+            if not self.model_path.exists():
+                raise FileNotFoundError(f"ONNX model not found: {self.model_path}")
+            if not self.config_path.exists():
+                raise FileNotFoundError(f"Model config not found: {self.config_path}")
+            
+            # Load model configuration
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                self.config = json.load(f)
+            
+            # Initialize ONNX runtime session
+            self.session = onnxruntime.InferenceSession(
+                str(self.model_path),
+                providers=['CPUExecutionProvider']  # Use CPU for reliability
+            )
+            
+            # Get model input/output info
+            self.inputs = self.session.get_inputs()
+            self.outputs = self.session.get_outputs()
+            
+            print(f"ONNX Model loaded successfully")
+            
+            # Audio configuration
+            self.sample_rate = self.config["audio"]["sample_rate"]
+            self.phoneme_id_map = self.config["phoneme_id_map"]
+            
+            # Inference parameters
+            self.noise_scale = self.config["inference"]["noise_scale"]
+            self.length_scale = self.config["inference"]["length_scale"] 
+            self.noise_w = self.config["inference"]["noise_w"]
+            
+            print(f"BT-7274 Voice System initialized with ONNX model")
+            
+        except Exception as e:
+            print(f"ONNX model failed to load: {e}")
+            print("Falling back to Windows TTS")
+            self.use_windows_tts = True
+            self._init_windows_tts()
+    
+    def _init_windows_tts(self):
+        """Initialize Windows TTS as fallback"""
+        try:
+            if PYTTSX3_AVAILABLE:
+                self.tts_engine = pyttsx3.init()
+                # Configure voice properties
+                voices = self.tts_engine.getProperty('voices')
+                # Try to find a male voice for BT-7274
+                for voice in voices:
+                    if 'male' in voice.name.lower() or 'david' in voice.name.lower():
+                        self.tts_engine.setProperty('voice', voice.id)
+                        break
+                
+                # Set speech rate and volume
+                self.tts_engine.setProperty('rate', 160)  # Slightly slower for robotic feel
+                self.tts_engine.setProperty('volume', 0.8)
+                print("Windows TTS (pyttsx3) initialized")
+            else:
+                print("Using basic Windows SAPI TTS")
+        except Exception as e:
+            print(f"TTS initialization error: {e}")
+            print("Voice synthesis disabled")
     
     def text_to_phonemes(self, text: str) -> str:
         """Convert text to phonemes using espeak"""
@@ -283,11 +317,18 @@ class BT7274Voice:
             if len(text) > 100:
                 text = text[:100].rsplit(' ', 1)[0] + "."
             
-            # Generate audio
+            # Use Windows TTS if ONNX model is problematic
+            if self.use_windows_tts:
+                self._speak_windows_tts(text, blocking)
+                return
+            
+            # Try ONNX model first
             audio = self.synthesize_audio(text)
             
             if len(audio) == 0:
-                print(f"Warning: No audio generated for: '{text[:30]}...'")
+                print(f"ONNX synthesis failed, using Windows TTS fallback")
+                self.use_windows_tts = True
+                self._speak_windows_tts(text, blocking)
                 return
             
             # Save if requested
@@ -298,18 +339,58 @@ class BT7274Voice:
             self.play_audio(audio, blocking=blocking)
             
         except Exception as e:
-            print(f"Voice Error: {e}")
+            print(f"ONNX Voice Error: {e}, falling back to Windows TTS")
+            self.use_windows_tts = True
+            self._speak_windows_tts(text, blocking)
+    
+    def _speak_windows_tts(self, text: str, blocking: bool = False):
+        """Use Windows TTS as fallback"""
+        try:
+            if hasattr(self, 'tts_engine') and PYTTSX3_AVAILABLE:
+                # Use pyttsx3
+                if blocking:
+                    self.tts_engine.say(text)
+                    self.tts_engine.runAndWait()
+                else:
+                    def speak_async():
+                        self.tts_engine.say(text)
+                        self.tts_engine.runAndWait()
+                    threading.Thread(target=speak_async, daemon=True).start()
+            else:
+                # Use Windows SAPI directly
+                if blocking:
+                    os.system(f'powershell -Command "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak(\'{text}\')"')
+                else:
+                    def speak_sapi():
+                        os.system(f'powershell -Command "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak(\'{text}\')"')
+                    threading.Thread(target=speak_sapi, daemon=True).start()
+        except Exception as e:
+            print(f"Windows TTS Error: {e}")
+            print("Voice synthesis completely disabled")
+    
+    def force_windows_tts(self):
+        """Force switch to Windows TTS mode"""
+        print("Switching to Windows TTS mode")
+        self.use_windows_tts = True
+        self._init_windows_tts()
     
     def test_voice(self):
         """Test the voice system with a simple phrase"""
-        test_phrase = "Hello pilot."
-        print(f"Testing voice with: '{test_phrase}'")
+        test_phrase = "Voice systems operational, Pilot."
+        print(f"Testing BT-7274 voice with: '{test_phrase}'")
         
-        # Debug phoneme conversion
-        phonemes = self.text_to_phonemes(test_phrase)
-        phoneme_ids = self.phonemes_to_ids(phonemes)
-        print(f"Phonemes: '{phonemes}'")
-        print(f"Phoneme IDs: {phoneme_ids}")
+        if self.use_windows_tts:
+            print("Using Windows TTS")
+        else:
+            print("Using ONNX model")
+            # Debug phoneme conversion for ONNX
+            try:
+                phonemes = self.text_to_phonemes(test_phrase)
+                phoneme_ids = self.phonemes_to_ids(phonemes)
+                print(f"Phonemes: '{phonemes}'")
+                print(f"Phoneme IDs length: {len(phoneme_ids)}")
+            except Exception as e:
+                print(f"Phoneme conversion error: {e}")
         
         self.speak(test_phrase, blocking=True)
 

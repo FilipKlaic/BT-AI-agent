@@ -5,12 +5,26 @@ from typing import List, Tuple
 
 # Try to import voice system (gracefully handle if not available)
 try:
-    from bt_voice import BT7274Voice
-    VOICE_AVAILABLE = True
-    print("BT-7274 Voice System: Loading...")
-except ImportError as e:
-    VOICE_AVAILABLE = False
-    print(f"BT-7274 Voice System: Not available ({e})")
+    # Try Piper TTS first (proper way to use the BT-7274 model)
+    from piper_voice import PiperBTVoice, check_piper_setup
+    if check_piper_setup():
+        from piper_voice import PiperBTVoice as BT7274Voice
+        VOICE_AVAILABLE = True
+        VOICE_TYPE = "piper"
+        print("BT-7274 Voice System: Loading with Piper TTS...")
+    else:
+        raise ImportError("Piper not available")
+except ImportError:
+    try:
+        # Fall back to the ONNX + Windows TTS hybrid
+        from bt_voice import BT7274Voice
+        VOICE_AVAILABLE = True
+        VOICE_TYPE = "hybrid"
+        print("BT-7274 Voice System: Loading with fallback system...")
+    except ImportError as e:
+        VOICE_AVAILABLE = False
+        VOICE_TYPE = None
+        print(f"BT-7274 Voice System: Not available ({e})")
 
 # Configure the Gemini API
 genai.configure(api_key="REMOVED_API_KEY")
@@ -28,11 +42,13 @@ class BT7274Terminal:
         
         # Initialize voice system if available
         self.voice_enabled = False
+        self.voice_type = VOICE_TYPE
         if VOICE_AVAILABLE:
             try:
                 self.bt_voice = BT7274Voice()
                 self.voice_enabled = True
-                print("BT-7274 Voice System: Online")
+                voice_status = "Piper TTS" if VOICE_TYPE == "piper" else "Hybrid (ONNX+TTS)"
+                print(f"BT-7274 Voice System: Online ({voice_status})")
             except Exception as e:
                 print(f"BT-7274 Voice System: Failed to initialize ({e})")
                 self.voice_enabled = False
@@ -187,6 +203,7 @@ class BT7274Terminal:
             "Commands:",
             "  - Type normally to chat with BT",
             "  - 'voice' to toggle voice mode (text+voice/text only/voice only)" if self.voice_enabled else "",
+            "  - 'tts' to switch to Windows TTS (if voice is garbled)" if self.voice_enabled else "",
             "  - 'exit', 'quit', or 'shutdown' to terminate",
             "─────────────────────────────────────────────────",
             ""
@@ -244,6 +261,15 @@ class BT7274Terminal:
                     # Check for voice toggle command
                     if user_input.lower() == "voice":
                         self.toggle_voice_mode()
+                        continue
+                    
+                    # Check for TTS mode switch command
+                    if user_input.lower() == "tts":
+                        if self.voice_enabled:
+                            self.bt_voice.force_windows_tts()
+                            print("Switched to Windows TTS mode")
+                        else:
+                            print("Voice system not available")
                         continue
                     
                     # Process the input and get BT's response
