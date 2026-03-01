@@ -38,20 +38,31 @@ class PiperBTVoice:
     
     def _check_piper_installation(self) -> bool:
         """Check if Piper is installed and accessible"""
+        # Check for local binary first
+        local_piper = Path(__file__).parent / "piper" / "piper"
+        if local_piper.exists() and local_piper.is_file():
+            self.piper_cmd = str(local_piper)
+            return True
+            
+        # Check system PATH
         try:
             result = subprocess.run(['piper', '--help'], 
                                    capture_output=True, 
                                    text=True, 
                                    timeout=5)
-            return result.returncode == 0
+            if result.returncode == 0:
+                self.piper_cmd = 'piper'
+                return True
         except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
-            return False
+            pass
+            
+        return False
     
     def synthesize_text_to_wav(self, text: str, output_file: str) -> bool:
         """Use Piper to synthesize text to WAV file"""
         try:
             cmd = [
-                'piper',
+                self.piper_cmd,
                 '--model', str(self.model_path),
                 '--config', str(self.config_path),
                 '--output_file', output_file
@@ -138,17 +149,17 @@ def check_piper_setup():
     """Check if Piper is properly set up"""
     try:
         voice = PiperBTVoice()
-        print("✅ Piper BT-7274 voice system ready!")
+        print("Piper BT-7274 voice system ready!")
         return True
     except RuntimeError as e:
-        print(f"❌ {e}")
-        print("\n📋 To install Piper TTS:")
+        print(f"Error: {e}")
+        print("\nTo install Piper TTS:")
         print("1. Download from: https://github.com/rhasspy/piper/releases")
         print("2. Extract piper.exe to your PATH or this directory")
         print("3. Or install via: pip install piper-tts")
         return False
     except Exception as e:
-        print(f"❌ Setup error: {e}")
+        print(f"Setup error: {e}")
         return False
 
 if __name__ == "__main__":
