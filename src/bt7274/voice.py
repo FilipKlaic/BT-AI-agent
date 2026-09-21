@@ -1,168 +1,178 @@
 """
-Piper TTS integration for BT-7274 voice model
-This uses the proper Piper TTS system instead of manual ONNX inference
+BT-7274's voice.
+
+`PiperVoice` loads the BT voice model once and runs a two-stage pipeline: one
+thread synthesizes sentences while another plays them, so BT starts talking as
+soon as the first sentence of a reply is ready. `SayVoice` is a fallback that
+uses the macOS `say` command when the Piper model can't be loaded.
 """
 
+import queue
+import shutil
 import subprocess
-import os
-import tempfile
 import threading
-import sounddevice as sd
-import soundfile as sf
 from pathlib import Path
-from typing import Optional
 
-class PiperBTVoice:
-    def __init__(self, model_dir: str = None):
-        """Initialize Piper TTS for BT-7274"""
-        if model_dir is None:
-            current_dir = Path(__file__).parent
-            model_dir = current_dir.parent / "voice_model"
-        
-        self.model_dir = Path(model_dir)
-        self.model_path = self.model_dir / "BT7274.onnx"
-        self.config_path = self.model_dir / "BT7274.onnx.json"
-        
-        # Check if Piper is available
-        self.piper_available = self._check_piper_installation()
-        
-        if not self.piper_available:
-            raise RuntimeError("Piper TTS not found. Please install Piper TTS.")
-        
-        if not self.model_path.exists():
-            raise FileNotFoundError(f"Model not found: {self.model_path}")
-        if not self.config_path.exists():
-            raise FileNotFoundError(f"Config not found: {self.config_path}")
-        
-        print("Piper BT-7274 Voice System initialized")
-    
-    def _check_piper_installation(self) -> bool:
-        """Check if Piper is installed and accessible"""
-        # Check for local binary first
-        local_piper = Path(__file__).parent / "piper" / "piper"
-        if local_piper.exists() and local_piper.is_file():
-            self.piper_cmd = str(local_piper)
-            return True
-            
-        # Check system PATH
-        try:
-            result = subprocess.run(['piper', '--help'], 
-                                   capture_output=True, 
-                                   text=True, 
-                                   timeout=5)
-            if result.returncode == 0:
-                self.piper_cmd = 'piper'
-                return True
-        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError):
-            pass
-            
-        return False
-    
-    def synthesize_text_to_wav(self, text: str, output_file: str) -> bool:
-        """Use Piper to synthesize text to WAV file"""
-        try:
-            cmd = [
-                self.piper_cmd,
-                '--model', str(self.model_path),
-                '--config', str(self.config_path),
-                '--output_file', output_file
-            ]
-            
-            # Run piper with text input
-            result = subprocess.run(
-                cmd,
-                input=text,
-                text=True,
-                capture_output=True,
-                timeout=30
-            )
-            
-            if result.returncode == 0 and os.path.exists(output_file):
-                return True
-            else:
-                print(f"Piper error: {result.stderr}")
-                return False
-                
-        except Exception as e:
-            print(f"Piper synthesis error: {e}")
-            return False
-    
-    def play_wav_file(self, wav_file: str, blocking: bool = False):
-        """Play WAV file using sounddevice"""
-        try:
-            data, samplerate = sf.read(wav_file)
-            
-            if blocking:
-                sd.play(data, samplerate)
-                sd.wait()
-            else:
-                def play_async():
-                    sd.play(data, samplerate)
-                    sd.wait()
-                threading.Thread(target=play_async, daemon=True).start()
-                
-        except Exception as e:
-            print(f"Audio playback error: {e}")
-    
-    def speak(self, text: str, blocking: bool = False):
-        """Main speak function using Piper TTS"""
-        try:
-            # Limit text length
-            if len(text) > 200:
-                text = text[:200].rsplit(' ', 1)[0] + "."
-            
-            # Create temporary WAV file
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-                temp_wav = temp_file.name
-            
-            # Synthesize with Piper
-            if self.synthesize_text_to_wav(text, temp_wav):
-                # Play the generated audio
-                self.play_wav_file(temp_wav, blocking)
-                
-                # Clean up temp file after a delay
-                if not blocking:
-                    def cleanup():
-                        import time
-                        time.sleep(10)  # Wait for audio to finish
-                        try:
-                            os.unlink(temp_wav)
-                        except:
-                            pass
-                    threading.Thread(target=cleanup, daemon=True).start()
-                else:
-                    os.unlink(temp_wav)
-            else:
-                print("Piper synthesis failed")
-                
-        except Exception as e:
-            print(f"Piper speak error: {e}")
-    
-    def test_voice(self):
-        """Test the Piper voice system"""
-        test_text = "Voice systems operational, Pilot. Protocol Three: Protect the Pilot."
-        print(f"Testing Piper BT-7274 voice: '{test_text}'")
-        self.speak(test_text, blocking=True)
+import numpy as np
 
-# Installation check function
-def check_piper_setup():
-    """Check if Piper is properly set up"""
+from .effects import radio_filter
+from .speech import clean_for_speech
+
+# Frames written to the audio device per call; small enough that stop() is near-instant.
+_PLAYBACK_BLOCK = 1024
+
+
+class _Pipeline:
+    """Tracks queued speech so callers can interrupt it or wait for it to finish."""
+
+    def __init__(self):
+        self._epoch = 0  # bumped by stop(); anything queued in an older epoch is dropped
+        self._pending = 0
+        self._idle = threading.Condition()
+
+    def _begin(self) -> int:
+        with self._idle:
+            self._pending += 1
+            return self._epoch
+
+    def _finish(self):
+        with self._idle:
+            self._pending -= 1
+            if self._pending == 0:
+                self._idle.notify_all()
+
+    def _is_stale(self, epoch: int) -> bool:
+        return epoch != self._epoch
+
+    @property
+    def speaking(self) -> bool:
+        return self._pending > 0
+
+    def stop(self):
+        """Drop everything queued and cut off the sentence being spoken."""
+        with self._idle:
+            self._epoch += 1
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Block until BT has finished talking. Returns False on timeout."""
+        with self._idle:
+            return self._idle.wait_for(lambda: self._pending == 0, timeout)
+
+
+class PiperVoice(_Pipeline):
+    name = "Piper (BT-7274 model)"
+
+    def __init__(self, model_path: Path, radio: bool = False):
+        super().__init__()
+        import sounddevice as sd
+        from piper import PiperVoice as _Piper
+
+        self._piper = _Piper.load(model_path)
+        self.sample_rate = self._piper.config.sample_rate
+        self.radio = radio
+
+        self._stream = sd.OutputStream(samplerate=self.sample_rate, channels=1, dtype="float32")
+        self._stream.start()
+
+        self._text_queue: queue.Queue = queue.Queue()
+        self._audio_queue: queue.Queue = queue.Queue()
+        self._threads = [
+            threading.Thread(target=self._synthesize_loop, daemon=True),
+            threading.Thread(target=self._playback_loop, daemon=True),
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def say(self, text: str):
+        """Queue a sentence to be spoken. Returns immediately."""
+        text = clean_for_speech(text)
+        if text:
+            self._text_queue.put((self._begin(), text))
+
+    def synthesize(self, text: str) -> np.ndarray:
+        chunks = [chunk.audio_float_array for chunk in self._piper.synthesize(text)]
+        audio = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+        return radio_filter(audio, self.sample_rate) if self.radio else audio
+
+    def _synthesize_loop(self):
+        while (item := self._text_queue.get()) is not None:
+            epoch, text = item
+            if self._is_stale(epoch):
+                self._finish()
+                continue
+            try:
+                audio = self.synthesize(text)
+            except Exception:
+                audio = np.zeros(0, dtype=np.float32)
+            self._audio_queue.put((epoch, audio))
+        self._audio_queue.put(None)
+
+    def _playback_loop(self):
+        while (item := self._audio_queue.get()) is not None:
+            epoch, audio = item
+            for start in range(0, audio.size, _PLAYBACK_BLOCK):
+                if self._is_stale(epoch):
+                    break
+                self._stream.write(np.ascontiguousarray(audio[start : start + _PLAYBACK_BLOCK]))
+            self._finish()
+
+    def close(self):
+        self.stop()
+        self._text_queue.put(None)
+        for thread in self._threads:
+            thread.join(timeout=2)
+        self._stream.stop()
+        self._stream.close()
+
+
+class SayVoice(_Pipeline):
+    """Fallback voice using the macOS `say` command. Not BT's real voice, but close enough."""
+
+    name = "macOS say (fallback)"
+    radio = False
+
+    def __init__(self):
+        super().__init__()
+        self._process: subprocess.Popen | None = None
+        self._queue: queue.Queue = queue.Queue()
+        self._thread = threading.Thread(target=self._speak_loop, daemon=True)
+        self._thread.start()
+
+    def say(self, text: str):
+        text = clean_for_speech(text)
+        if text:
+            self._queue.put((self._begin(), text))
+
+    def _speak_loop(self):
+        while (item := self._queue.get()) is not None:
+            epoch, text = item
+            if not self._is_stale(epoch):
+                # Arguments are passed as a list (no shell), so any text is safe here.
+                self._process = subprocess.Popen(["say", "-r", "170", text])
+                self._process.wait()
+                self._process = None
+            self._finish()
+
+    def stop(self):
+        super().stop()
+        if self._process is not None:
+            self._process.terminate()
+
+    def close(self):
+        self.stop()
+        self._queue.put(None)
+        self._thread.join(timeout=2)
+
+
+Voice = PiperVoice | SayVoice
+
+
+def create_voice(model_path: Path, radio: bool = False) -> tuple[Voice | None, str]:
+    """Return (voice, status message). Falls back to `say`, then to no voice at all."""
     try:
-        voice = PiperBTVoice()
-        print("Piper BT-7274 voice system ready!")
-        return True
-    except RuntimeError as e:
-        print(f"Error: {e}")
-        print("\nTo install Piper TTS:")
-        print("1. Download from: https://github.com/rhasspy/piper/releases")
-        print("2. Extract piper.exe to your PATH or this directory")
-        print("3. Or install via: pip install piper-tts")
-        return False
-    except Exception as e:
-        print(f"Setup error: {e}")
-        return False
-
-if __name__ == "__main__":
-    if check_piper_setup():
-        voice = PiperBTVoice()
-        voice.test_voice()
+        return PiperVoice(model_path, radio=radio), "Online"
+    except Exception as error:
+        reason = f"{type(error).__name__}: {error}"
+    if shutil.which("say"):
+        return SayVoice(), f"Fallback ({reason})"
+    return None, f"Offline ({reason})"
