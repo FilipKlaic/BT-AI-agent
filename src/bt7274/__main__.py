@@ -40,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.model:
         settings.model = args.model
 
-    console = Console()
+    console = Console(highlight=False)  # no auto-colouring of numbers and paths in BT's text
     memory = Memory.load(None if args.no_memory else settings.data_dir / "memory.json")
     terminal: Terminal | None = None
 
