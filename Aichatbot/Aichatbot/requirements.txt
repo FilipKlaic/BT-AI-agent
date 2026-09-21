@@ -1,6 +1,0 @@
-google-genai
-onnxruntime>=1.16.0
-numpy>=1.24.0
-soundfile>=0.12.1
-sounddevice>=0.4.6
-python-dotenv

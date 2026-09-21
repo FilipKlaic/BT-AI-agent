@@ -1,1 +1,0 @@
-To run program, change to src and run: streamlit run streamlit_app.py
