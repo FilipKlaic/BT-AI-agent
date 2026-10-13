@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <meta name="color-scheme" content="dark">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="BT-7274">
+  <meta name="description" content="Talk to BT-7274.">
+  <title>BT-7274</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="stage" data-state="off">
+    <p class="hud" id="status" aria-live="polite">BT-7274 · OFFLINE</p>
+
+    <button class="eye" id="eye" type="button" aria-label="Talk to BT" aria-keyshortcuts="Space">
+      <span class="eye-bloom"></span>
+      <span class="eye-housing">
+        <span class="eye-ticks"></span>
+        <span class="eye-lens">
+          <span class="eye-core"></span>
+          <span class="eye-glint"></span>
+        </span>
+      </span>
+    </button>
+
+    <div class="captions">
+      <p class="heard" id="heard"></p>
+      <p class="caption" id="caption" aria-live="polite"></p>
+    </div>
+
+    <p class="hud hint" id="hint">Tap the eye to talk</p>
+  </main>
+
+  <form class="type-form" id="type-form" autocomplete="off" hidden>
+    <input id="type-input" type="text" maxlength="2000" enterkeyhint="send"
+           placeholder="Message BT" aria-label="Message BT">
+    <button type="submit" aria-label="Send">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h14M13 6l6 6-6 6"/></svg>
+    </button>
+  </form>
+
+  <nav class="dock">
+    <button type="button" id="keyboard-toggle" aria-label="Type instead" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="6" width="18" height="12" rx="2"/>
+        <path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/>
+      </svg>
+    </button>
+    <button type="button" id="menu-toggle" aria-label="Settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+  </nav>
+
+  <dialog class="sheet" id="menu">
+    <form method="dialog">
+      <h2>BT-7274</h2>
+      <p class="sheet-sub" id="menu-brain"></p>
+
+      <label class="row">
+        <span>Comms radio effect</span>
+        <input type="checkbox" id="opt-radio">
+      </label>
+      <label class="row">
+        <span>Subtitles</span>
+        <input type="checkbox" id="opt-subtitles">
+      </label>
+      <button type="button" class="row-action" id="change-key">
+        <span>Change API key</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+
+      <h3>Pilot data</h3>
+      <ul class="facts" id="facts"></ul>
+      <p class="sheet-sub" id="exchanges"></p>
+      <p class="sheet-sub">Stored on this computer, shared with the terminal.</p>
+
+      <div class="actions">
+        <button type="button" class="danger" id="forget">Forget everything</button>
+        <button value="close">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="sheet" id="setup">
+    <form id="setup-form" autocomplete="off">
+      <h2>Link with Gemini</h2>
+      <p class="sheet-sub">
+        BT thinks with Google's Gemini. Get a free key from
+        <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio</a>
+        and paste it here.
+      </p>
+      <input type="password" id="setup-key" name="api_key" spellcheck="false"
+             autocapitalize="off" autocomplete="off" aria-label="Gemini API key"
+             placeholder="Gemini API key" required>
+      <p class="error" id="setup-error" role="alert" hidden></p>
+      <p class="sheet-sub">
+        The key is saved in <code>.env</code> on this computer and only ever sent to Google.
+      </p>
+      <div class="actions">
+        <button type="button" id="setup-cancel">Cancel</button>
+        <button type="submit" id="setup-submit">Link</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>

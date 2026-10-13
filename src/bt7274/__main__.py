@@ -20,7 +20,7 @@ from .voice import create_voice
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="bt", description="Talk to BT-7274 in your terminal.")
     parser.add_argument("--backend", choices=sorted(DEFAULT_MODELS), help="Language model backend.")
-    parser.add_argument("--model", help="Model name, e.g. gemini-2.5-flash or llama3.2.")
+    parser.add_argument("--model", help="Model name, e.g. gemini-3.5-flash-lite or llama3.2.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--text-only", action="store_true", help="Don't load BT's voice.")
     mode.add_argument("--voice-only", action="store_true", help="Speak replies without printing.")

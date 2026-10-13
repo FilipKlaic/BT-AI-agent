@@ -5,7 +5,7 @@ import pytest
 from google.genai import types
 
 from bt7274.brain import GeminiBrain, OllamaBrain, SetupError, create_brain
-from bt7274.config import Settings
+from bt7274.config import PERSONA, Settings, make_persona
 from bt7274.memory import Exchange, Memory
 from bt7274.tools import Tool, Toolbox
 
@@ -135,6 +135,24 @@ def test_gemini_empty_reply_is_not_recorded():
     brain = gemini(FakeGemini([types.GenerateContentResponse(candidates=[])]), memory)
     assert list(brain.reply("Hello?")) == []
     assert memory.exchanges == []
+
+
+def test_gemini_thinking_config_per_model():
+    def thinking(model):
+        brain = GeminiBrain("x", model, Memory.load(None), Toolbox([]), client=FakeGemini())
+        return brain._thinking_config()
+
+    assert thinking("gemini-2.5-flash").thinking_budget == 0
+    assert thinking("models/gemini-2.5-flash").thinking_budget == 0
+    for model in ("gemini-3.5-flash-lite", "gemini-3.6-flash"):
+        assert thinking(model).thinking_level == types.ThinkingLevel.LOW
+    assert thinking("gemini-flash-latest") is None
+
+
+def test_persona_forbids_inventing_tool_results():
+    assert "no clock" in PERSONA
+    assert "never say an action is done unless its tool returned success" in PERSONA
+    assert "BT-7274" in make_persona("the time")
 
 
 # --- Ollama --------------------------------------------------------------------------

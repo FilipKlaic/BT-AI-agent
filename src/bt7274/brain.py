@@ -20,17 +20,31 @@ from .tools import Toolbox
 MAX_TOOL_ROUNDS = 5
 MAX_OUTPUT_TOKENS = 1024
 
+TRANSCRIBE_PROMPT = (
+    "The speaker is talking to BT-7274, an AI they address as 'BT' (said 'bee tee'). "
+    "Transcribe exactly what is said in this recording, in the language spoken. "
+    "Reply with the transcript only. If nothing intelligible is said, reply NO_SPEECH."
+)
+
 
 class SetupError(Exception):
     """Configuration problem that should be shown to the user as-is."""
 
 
 class Brain:
-    def __init__(self, model: str, memory: Memory, toolbox: Toolbox, history_turns: int):
+    def __init__(
+        self,
+        model: str,
+        memory: Memory,
+        toolbox: Toolbox,
+        history_turns: int,
+        persona: str = PERSONA,
+    ):
         self.model = model
         self.memory = memory
         self.toolbox = toolbox
         self.history_turns = history_turns
+        self.persona = persona
 
     @property
     def label(self) -> str:
@@ -38,9 +52,9 @@ class Brain:
 
     def system_prompt(self) -> str:
         if not self.memory.facts:
-            return PERSONA
+            return self.persona
         facts = "\n".join(f"- {fact}" for fact in self.memory.facts)
-        return f"{PERSONA}\n\nWhat you know about the Pilot:\n{facts}"
+        return f"{self.persona}\n\nWhat you know about the Pilot:\n{facts}"
 
     def reply(self, text: str) -> Iterator[str]:
         """Stream BT's reply to `text`, one chunk of text at a time."""
@@ -60,8 +74,9 @@ class GeminiBrain(Brain):
         toolbox: Toolbox,
         history_turns: int = 10,
         client: Any = None,
+        persona: str = PERSONA,
     ):
-        super().__init__(model, memory, toolbox, history_turns)
+        super().__init__(model, memory, toolbox, history_turns, persona)
         from google import genai
         from google.genai import types
 
@@ -147,6 +162,21 @@ class GeminiBrain(Brain):
             self._turns.append(turn)
             self.memory.add_exchange(text, reply)
 
+    def transcribe(self, audio: bytes, mime_type: str = "audio/wav") -> str:
+        """Turn a voice recording into text, so the web app needs no local speech model."""
+        response = self._client.models.generate_content(
+            model=self.model,
+            contents=[
+                self._types.Part.from_bytes(data=audio, mime_type=mime_type),
+                TRANSCRIBE_PROMPT,
+            ],
+            config=self._types.GenerateContentConfig(
+                temperature=0, thinking_config=self._thinking_config()
+            ),
+        )
+        text = (response.text or "").strip()
+        return "" if text.strip(".").upper() == "NO_SPEECH" else text
+
     def forget(self):
         self._turns.clear()
 
@@ -162,8 +192,9 @@ class OllamaBrain(Brain):
         toolbox: Toolbox,
         history_turns: int = 10,
         http: httpx.Client | None = None,
+        persona: str = PERSONA,
     ):
-        super().__init__(model, memory, toolbox, history_turns)
+        super().__init__(model, memory, toolbox, history_turns, persona)
         self.host = host
         self._http = http or httpx.Client(base_url=host, timeout=httpx.Timeout(120, connect=5))
         self._turns: list[list[dict[str, Any]]] = [
