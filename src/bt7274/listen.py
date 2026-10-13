@@ -13,6 +13,8 @@ import numpy as np
 
 SAMPLE_RATE = 16_000  # what Whisper expects
 MIN_SECONDS = 0.3
+# Primes Whisper with sample dialogue; without it "BT" comes out as "Beatty".
+VOCABULARY_HINT = "BT (the Titan BT-7274) and the Pilot. Pilot: Hey BT, how are you, BT?"
 
 
 class Ears:
@@ -65,6 +67,7 @@ class Ears:
             language="en" if self.model_name.endswith(".en") else None,
             beam_size=1,
             vad_filter=True,
+            initial_prompt=VOCABULARY_HINT,
         )
         return " ".join(segment.text.strip() for segment in segments).strip()
 

@@ -1,7 +1,7 @@
 [project]
 name = "bt7274"
 version = "0.2.0"
-description = "Talk to BT-7274 from Titanfall 2 in your terminal, with his own voice."
+description = "Talk to BT-7274 from Titanfall 2 in your terminal or browser, with his own voice."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -18,9 +18,12 @@ dependencies = [
 [project.optional-dependencies]
 # Speech input (push-to-talk). Kept optional because it pulls in a larger model runtime.
 listen = ["faster-whisper>=1.1"]
+# The browser interface (`uv run bt-web`), served from your own computer.
+web = ["fastapi>=0.115", "uvicorn>=0.30", "python-multipart>=0.0.9"]
 
 [project.scripts]
 bt = "bt7274.__main__:main"
+bt-web = "bt7274.web:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6"]
@@ -37,3 +40,4 @@ select = ["E", "F", "W", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient`"]

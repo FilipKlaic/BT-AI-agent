@@ -13,7 +13,7 @@ import time
 import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
 from typing import Any
 
 import httpx
@@ -89,8 +89,8 @@ def _schema(properties: dict[str, dict] | None = None, required: list[str] | Non
     return {"type": "object", "properties": properties or {}, "required": required or []}
 
 
-def get_time() -> dict[str, Any]:
-    now = datetime.now().astimezone()
+def get_time(tz: tzinfo | None = None) -> dict[str, Any]:
+    now = datetime.now(tz) if tz else datetime.now().astimezone()
     return {
         "local_time": now.strftime("%H:%M"),
         "date": now.strftime("%A, %d %B %Y"),
@@ -127,114 +127,156 @@ def open_app(name: str) -> dict[str, Any]:
     return {"opened": name}
 
 
-def build_toolbox(
-    memory: Memory,
-    on_alert: Callable[[str], None],
-    http: httpx.Client | None = None,
-) -> Toolbox:
-    """Create BT's tools. `on_alert` is called from a background thread when a timer fires."""
-    http = http or httpx.Client(timeout=10)
+def get_weather(http: httpx.Client, location: str) -> dict[str, Any]:
+    # The geocoder matches place names only, so drop any ", Country" suffix.
+    place = location.split(",")[0].strip()
+    found = http.get(
+        "https://geocoding-api.open-meteo.com/v1/search",
+        params={"name": place, "count": 1, "language": "en", "format": "json"},
+    )
+    found.raise_for_status()
+    results = found.json().get("results")
+    if not results:
+        return {"error": f"Could not find a place called {location}."}
+    spot = results[0]
+    forecast = http.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": spot["latitude"],
+            "longitude": spot["longitude"],
+            "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
+            "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+            "forecast_days": 1,
+            "timezone": "auto",
+        },
+    )
+    forecast.raise_for_status()
+    data = forecast.json()
+    current, daily = data["current"], data["daily"]
+    return {
+        "location": f"{spot['name']}, {spot.get('country', '')}".strip(", "),
+        "conditions": WEATHER_CODES.get(current["weather_code"], "unknown"),
+        "temperature_c": current["temperature_2m"],
+        "feels_like_c": current["apparent_temperature"],
+        "wind_kmh": current["wind_speed_10m"],
+        "today_high_c": daily["temperature_2m_max"][0],
+        "today_low_c": daily["temperature_2m_min"][0],
+        "chance_of_rain_percent": daily["precipitation_probability_max"][0],
+    }
+
+
+# --- tool definitions ------------------------------------------------------------
+# One function per tool, so the terminal and the web app can each pick their set.
+
+
+def time_tool(tz: tzinfo | None = None) -> Tool:
+    return Tool("get_time", "Get the current local date and time.", _schema(), lambda: get_time(tz))
+
+
+def system_status_tool() -> Tool:
+    return Tool(
+        "system_status",
+        "Get the status of the Pilot's computer: battery, CPU, memory, disk, uptime.",
+        _schema(),
+        system_status,
+    )
+
+
+def timer_tool(start: Callable[[int, str], None], tz: tzinfo | None = None) -> Tool:
+    """`start(seconds, label)` arranges for BT to announce the timer when it finishes."""
 
     def set_timer(seconds: int, label: str = "timer") -> dict[str, Any]:
         seconds = int(seconds)
         if not 0 < seconds <= MAX_TIMER_SECONDS:
             return {"error": f"Timer must be between 1 second and {MAX_TIMER_SECONDS} seconds."}
-        timer = threading.Timer(seconds, on_alert, args=(f"Pilot, your {label} is complete.",))
-        timer.daemon = True
-        timer.start()
-        fires_at = datetime.now() + timedelta(seconds=seconds)
+        start(seconds, label)
+        fires_at = (datetime.now(tz) if tz else datetime.now()) + timedelta(seconds=seconds)
         return {"status": "set", "label": label, "fires_at": fires_at.strftime("%H:%M:%S")}
 
-    def get_weather(location: str) -> dict[str, Any]:
-        # The geocoder matches place names only, so drop any ", Country" suffix.
-        place = location.split(",")[0].strip()
-        found = http.get(
-            "https://geocoding-api.open-meteo.com/v1/search",
-            params={"name": place, "count": 1, "language": "en", "format": "json"},
-        )
-        found.raise_for_status()
-        results = found.json().get("results")
-        if not results:
-            return {"error": f"Could not find a place called {location}."}
-        spot = results[0]
-        forecast = http.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": spot["latitude"],
-                "longitude": spot["longitude"],
-                "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
-                "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
-                "forecast_days": 1,
-                "timezone": "auto",
+    return Tool(
+        "set_timer",
+        "Set a countdown timer. BT announces it out loud when it finishes.",
+        _schema(
+            {
+                "seconds": {"type": "integer", "description": "Duration in seconds."},
+                "label": {"type": "string", "description": "Short name, e.g. 'tea'."},
             },
-        )
-        forecast.raise_for_status()
-        data = forecast.json()
-        current, daily = data["current"], data["daily"]
-        return {
-            "location": f"{spot['name']}, {spot.get('country', '')}".strip(", "),
-            "conditions": WEATHER_CODES.get(current["weather_code"], "unknown"),
-            "temperature_c": current["temperature_2m"],
-            "feels_like_c": current["apparent_temperature"],
-            "wind_kmh": current["wind_speed_10m"],
-            "today_high_c": daily["temperature_2m_max"][0],
-            "today_low_c": daily["temperature_2m_min"][0],
-            "chance_of_rain_percent": daily["precipitation_probability_max"][0],
-        }
+            required=["seconds"],
+        ),
+        set_timer,
+    )
 
+
+def weather_tool(http: httpx.Client) -> Tool:
+    return Tool(
+        "get_weather",
+        "Get current weather and today's forecast for a city.",
+        _schema(
+            {"location": {"type": "string", "description": "City name, e.g. 'Zagreb'."}},
+            required=["location"],
+        ),
+        lambda location: get_weather(http, location),
+    )
+
+
+def open_url_tool(opener: Callable[[str], dict[str, Any]] = open_url) -> Tool:
+    return Tool(
+        "open_url",
+        "Open a web page in the Pilot's browser.",
+        _schema({"url": {"type": "string", "description": "Full http(s) URL."}}, ["url"]),
+        opener,
+    )
+
+
+def open_app_tool() -> Tool:
+    return Tool(
+        "open_app",
+        "Open an application on the Pilot's Mac by name, e.g. 'Spotify'.",
+        _schema({"name": {"type": "string", "description": "Application name."}}, ["name"]),
+        open_app,
+    )
+
+
+def remember_tool(memory: Memory) -> Tool:
     def remember(fact: str) -> dict[str, Any]:
         return {"stored": memory.add_fact(fact), "fact": fact}
 
+    return Tool(
+        "remember",
+        "Permanently remember a fact about the Pilot (name, preferences, plans).",
+        _schema(
+            {"fact": {"type": "string", "description": "One short fact in third person."}},
+            required=["fact"],
+        ),
+        remember,
+    )
+
+
+def message_for_timer(label: str) -> str:
+    return f"Pilot, your {label} is complete."
+
+
+def build_toolbox(
+    memory: Memory,
+    on_alert: Callable[[str], None],
+    http: httpx.Client | None = None,
+) -> Toolbox:
+    """Create BT's terminal tools. `on_alert` is called from a timer thread when one fires."""
+    http = http or httpx.Client(timeout=10)
+
+    def start_timer(seconds: int, label: str):
+        timer = threading.Timer(seconds, on_alert, args=(message_for_timer(label),))
+        timer.daemon = True
+        timer.start()
+
     return Toolbox(
         [
-            Tool("get_time", "Get the current local date and time.", _schema(), get_time),
-            Tool(
-                "system_status",
-                "Get the status of the Pilot's computer: battery, CPU, memory, disk, uptime.",
-                _schema(),
-                system_status,
-            ),
-            Tool(
-                "set_timer",
-                "Set a countdown timer. BT announces it out loud when it finishes.",
-                _schema(
-                    {
-                        "seconds": {"type": "integer", "description": "Duration in seconds."},
-                        "label": {"type": "string", "description": "Short name, e.g. 'tea'."},
-                    },
-                    required=["seconds"],
-                ),
-                set_timer,
-            ),
-            Tool(
-                "get_weather",
-                "Get current weather and today's forecast for a city.",
-                _schema(
-                    {"location": {"type": "string", "description": "City name, e.g. 'Zagreb'."}},
-                    required=["location"],
-                ),
-                get_weather,
-            ),
-            Tool(
-                "open_url",
-                "Open a web page in the Pilot's browser.",
-                _schema({"url": {"type": "string", "description": "Full http(s) URL."}}, ["url"]),
-                open_url,
-            ),
-            Tool(
-                "open_app",
-                "Open an application on the Pilot's Mac by name, e.g. 'Spotify'.",
-                _schema({"name": {"type": "string", "description": "Application name."}}, ["name"]),
-                open_app,
-            ),
-            Tool(
-                "remember",
-                "Permanently remember a fact about the Pilot (name, preferences, plans).",
-                _schema(
-                    {"fact": {"type": "string", "description": "One short fact in third person."}},
-                    required=["fact"],
-                ),
-                remember,
-            ),
+            time_tool(),
+            system_status_tool(),
+            timer_tool(start_timer),
+            weather_tool(http),
+            open_url_tool(),
+            open_app_tool(),
+            remember_tool(memory),
         ]
     )
